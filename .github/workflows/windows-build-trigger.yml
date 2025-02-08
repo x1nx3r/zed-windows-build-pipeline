@@ -1,3 +1,5 @@
+name: Manual Windows Build & Release for Zed
+
 on:
   workflow_dispatch:
     inputs:
