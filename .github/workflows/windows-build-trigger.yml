@@ -18,18 +18,15 @@ jobs:
           target: wasm32-wasip1
           override: true
 
-      - name: Install Windows 11 SDK (26100)
-        run: choco install windows-sdk-11-version-26100
-
       - name: Install Visual Studio Build Tools (Including Windows 11 SDK 26100)
         run: |
-          choco install visualstudio2022buildtools --package-parameters `
-            "--add Microsoft.VisualStudio.Component.CoreEditor `
-            --add Microsoft.VisualStudio.Workload.CoreEditor `
-            --add Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
-            --add Microsoft.VisualStudio.ComponentGroup.WebToolsExtensions.CMake `
-            --add Microsoft.VisualStudio.Component.VC.CMake.Project `
-            --add Microsoft.VisualStudio.Component.Windows11SDK.26100 `
+          choco install visualstudio2022buildtools --package-parameters 
+            "--add Microsoft.VisualStudio.Component.CoreEditor 
+            --add Microsoft.VisualStudio.Workload.CoreEditor
+            --add Microsoft.VisualStudio.Component.VC.Tools.x86.x64
+            --add Microsoft.VisualStudio.ComponentGroup.WebToolsExtensions.CMake
+            --add Microsoft.VisualStudio.Component.VC.CMake.Project
+            --add Microsoft.VisualStudio.Component.Windows11SDK.26100
             --add Microsoft.VisualStudio.Component.VC.Runtimes.x86.x64.Spectre"
 
       - name: Install CMake
