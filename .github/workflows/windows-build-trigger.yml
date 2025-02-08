@@ -1,0 +1,51 @@
+name: Manual Windows Build & Release for Zed
+
+on:
+  workflow_dispatch:  # Allows manual trigger
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v3
+
+      - name: Set Up Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          target: wasm32-wasip1
+          override: true
+
+      - name: Install Windows 11 SDK (26100)
+        run: choco install windows-sdk-11-version-26100
+
+      - name: Install Visual Studio Build Tools (Matching Local Setup)
+        run: |
+          choco install visualstudio2022buildtools --package-parameters `
+            "--add Microsoft.VisualStudio.Component.CoreEditor `
+            --add Microsoft.VisualStudio.Workload.CoreEditor `
+            --add Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
+            --add Microsoft.VisualStudio.ComponentGroup.WebToolsExtensions.CMake `
+            --add Microsoft.VisualStudio.Component.Windows10SDK.20348 `
+
+      - name: Install CMake
+        run: choco install cmake --installargs 'ADD_CMAKE_TO_PATH=System'
+
+      - name: Build Zed
+        run: cargo build --release
+
+      - name: Package the Binary
+        run: |
+          mkdir dist
+          cp target/release/zed.exe dist/
+          cd dist
+          Compress-Archive -Path zed.exe -DestinationPath zed-windows.zip
+
+      - name: Upload Release Asset
+        uses: softprops/action-gh-release@v1
+        with:
+          files: dist/zed-windows.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
