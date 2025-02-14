@@ -28,7 +28,10 @@ jobs:
              --add Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
              --add Microsoft.VisualStudio.Component.VC.Runtimes.x86.x64.Spectre `
              --add Microsoft.VisualStudio.Component.Windows11SDK.26100 `
-             --add Microsoft.VisualStudio.Component.VC.CMake.Project" -NoNewWindow -Wait
+             --add Microsoft.VisualStudio.Component.VC.CMake.Project
+             --add Microsoft.VisualStudio.ComponentGroup.WebToolsExtensions.CMake `
+             --add Microsoft.VisualStudio.Component.CoreEditor `
+             --add Microsoft.VisualStudio.Workload.CoreEditor" -NoNewWindow -Wait
 
       - name: Build project
         run: |
