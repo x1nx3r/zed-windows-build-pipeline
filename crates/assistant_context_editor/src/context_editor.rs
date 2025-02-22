@@ -634,7 +634,7 @@ impl ContextEditor {
                                 }
                             });
                             let placeholder = FoldPlaceholder {
-                                render: Arc::new(move |_, _, _, _| Empty.into_any()),
+                                render: Arc::new(move |_, _, _| Empty.into_any()),
                                 ..Default::default()
                             };
                             let render_toggle = {
@@ -2043,6 +2043,15 @@ impl ContextEditor {
         });
     }
 
+    fn toggle_model_selector(
+        &mut self,
+        _: &ToggleModelSelector,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.language_model_selector_menu_handle.toggle(window, cx);
+    }
+
     fn save(&mut self, _: &Save, _window: &mut Window, cx: &mut Context<Self>) {
         self.context.update(cx, |context, cx| {
             context.save(Some(Duration::from_millis(500)), self.fs.clone(), cx)
@@ -2406,13 +2415,9 @@ impl ContextEditor {
                     h_flex()
                         .gap_0p5()
                         .child(
-                            div().max_w_32().child(
-                                Label::new(model_name)
-                                    .size(LabelSize::Small)
-                                    .color(Color::Muted)
-                                    .text_ellipsis()
-                                    .into_any_element(),
-                            ),
+                            Label::new(model_name)
+                                .size(LabelSize::Small)
+                                .color(Color::Muted),
                         )
                         .child(
                             Icon::new(IconName::ChevronDown)
@@ -2429,6 +2434,7 @@ impl ContextEditor {
                     cx,
                 )
             },
+            gpui::Corner::BottomLeft,
         )
         .with_handle(self.language_model_selector_menu_handle.clone())
     }
@@ -2662,8 +2668,8 @@ fn render_fold_icon_button(
     editor: WeakEntity<Editor>,
     icon: IconName,
     label: SharedString,
-) -> Arc<dyn Send + Sync + Fn(FoldId, Range<Anchor>, &mut Window, &mut App) -> AnyElement> {
-    Arc::new(move |fold_id, fold_range, _window, _cx| {
+) -> Arc<dyn Send + Sync + Fn(FoldId, Range<Anchor>, &mut App) -> AnyElement> {
+    Arc::new(move |fold_id, fold_range, _cx| {
         let editor = editor.clone();
         ButtonLike::new(fold_id)
             .style(ButtonStyle::Filled)
@@ -2723,7 +2729,7 @@ pub fn fold_toggle(
 fn quote_selection_fold_placeholder(title: String, editor: WeakEntity<Editor>) -> FoldPlaceholder {
     FoldPlaceholder {
         render: Arc::new({
-            move |fold_id, fold_range, _window, _cx| {
+            move |fold_id, fold_range, _cx| {
                 let editor = editor.clone();
                 ButtonLike::new(fold_id)
                     .style(ButtonStyle::Filled)
@@ -2869,7 +2875,6 @@ impl EventEmitter<SearchEvent> for ContextEditor {}
 impl Render for ContextEditor {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let provider = LanguageModelRegistry::read_global(cx).active_provider();
-
         let accept_terms = if self.show_accept_terms {
             provider.as_ref().and_then(|provider| {
                 provider.render_accept_terms(LanguageModelProviderTosView::PromptEditorPopup, cx)
@@ -2890,6 +2895,7 @@ impl Render for ContextEditor {
             .on_action(cx.listener(ContextEditor::edit))
             .on_action(cx.listener(ContextEditor::assist))
             .on_action(cx.listener(ContextEditor::split))
+            .on_action(cx.listener(ContextEditor::toggle_model_selector))
             .size_full()
             .children(self.render_notice(cx))
             .child(
@@ -3252,48 +3258,58 @@ impl ContextEditorToolbarItem {
             model_summary_editor,
         }
     }
+}
 
-    fn render_remaining_tokens(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
-        let context = &self
-            .active_context_editor
-            .as_ref()?
-            .upgrade()?
-            .read(cx)
-            .context;
-        let (token_count_color, token_count, max_token_count) = match token_state(context, cx)? {
-            TokenState::NoTokensLeft {
-                max_token_count,
-                token_count,
-            } => (Color::Error, token_count, max_token_count),
-            TokenState::HasMoreTokens {
-                max_token_count,
-                token_count,
-                over_warn_threshold,
-            } => {
-                let color = if over_warn_threshold {
-                    Color::Warning
-                } else {
-                    Color::Muted
-                };
-                (color, token_count, max_token_count)
-            }
-        };
-        Some(
-            h_flex()
-                .gap_0p5()
-                .child(
-                    Label::new(humanize_token_count(token_count))
-                        .size(LabelSize::Small)
-                        .color(token_count_color),
-                )
-                .child(Label::new("/").size(LabelSize::Small).color(Color::Muted))
-                .child(
-                    Label::new(humanize_token_count(max_token_count))
-                        .size(LabelSize::Small)
-                        .color(Color::Muted),
-                ),
-        )
-    }
+pub fn render_remaining_tokens(
+    context_editor: &Entity<ContextEditor>,
+    cx: &App,
+) -> Option<impl IntoElement> {
+    let context = &context_editor.read(cx).context;
+
+    let (token_count_color, token_count, max_token_count, tooltip) = match token_state(context, cx)?
+    {
+        TokenState::NoTokensLeft {
+            max_token_count,
+            token_count,
+        } => (
+            Color::Error,
+            token_count,
+            max_token_count,
+            Some("Token Limit Reached"),
+        ),
+        TokenState::HasMoreTokens {
+            max_token_count,
+            token_count,
+            over_warn_threshold,
+        } => {
+            let (color, tooltip) = if over_warn_threshold {
+                (Color::Warning, Some("Token Limit is Close to Exhaustion"))
+            } else {
+                (Color::Muted, None)
+            };
+            (color, token_count, max_token_count, tooltip)
+        }
+    };
+
+    Some(
+        h_flex()
+            .id("token-count")
+            .gap_0p5()
+            .child(
+                Label::new(humanize_token_count(token_count))
+                    .size(LabelSize::Small)
+                    .color(token_count_color),
+            )
+            .child(Label::new("/").size(LabelSize::Small).color(Color::Muted))
+            .child(
+                Label::new(humanize_token_count(max_token_count))
+                    .size(LabelSize::Small)
+                    .color(Color::Muted),
+            )
+            .when_some(tooltip, |element, tooltip| {
+                element.tooltip(Tooltip::text(tooltip))
+            }),
+    )
 }
 
 impl Render for ContextEditorToolbarItem {
@@ -3336,7 +3352,12 @@ impl Render for ContextEditorToolbarItem {
             //     scan_items_remaining
             //         .map(|remaining_items| format!("Files to scan: {}", remaining_items))
             // })
-            .children(self.render_remaining_tokens(cx));
+            .children(
+                self.active_context_editor
+                    .as_ref()
+                    .and_then(|editor| editor.upgrade())
+                    .and_then(|editor| render_remaining_tokens(&editor, cx)),
+            );
 
         h_flex()
             .px_0p5()
@@ -3392,7 +3413,7 @@ fn invoked_slash_command_fold_placeholder(
     FoldPlaceholder {
         constrain_width: false,
         merge_adjacent: false,
-        render: Arc::new(move |fold_id, _, _window, cx| {
+        render: Arc::new(move |fold_id, _, cx| {
             let Some(context) = context.upgrade() else {
                 return Empty.into_any();
             };
