@@ -379,6 +379,11 @@
             "font_weight": null
           },
           "variable": {
+            "color": "#ebdbb2ff",
+            "font_style": null,
+            "font_weight": null
+          },
+          "variable.special": {
             "color": "#83a598ff",
             "font_style": null,
             "font_weight": null
@@ -767,6 +772,11 @@
             "font_weight": null
           },
           "variable": {
+            "color": "#ebdbb2ff",
+            "font_style": null,
+            "font_weight": null
+          },
+          "variable.special": {
             "color": "#83a598ff",
             "font_style": null,
             "font_weight": null
@@ -1155,6 +1165,11 @@
             "font_weight": null
           },
           "variable": {
+            "color": "#ebdbb2ff",
+            "font_style": null,
+            "font_weight": null
+          },
+          "variable.special": {
             "color": "#83a598ff",
             "font_style": null,
             "font_weight": null
@@ -1543,6 +1558,11 @@
             "font_weight": null
           },
           "variable": {
+            "color": "#282828ff",
+            "font_style": null,
+            "font_weight": null
+          },
+          "variable.special": {
             "color": "#066578ff",
             "font_style": null,
             "font_weight": null
@@ -1931,6 +1951,11 @@
             "font_weight": null
           },
           "variable": {
+            "color": "#282828ff",
+            "font_style": null,
+            "font_weight": null
+          },
+          "variable.special": {
             "color": "#066578ff",
             "font_style": null,
             "font_weight": null
@@ -2319,6 +2344,11 @@
             "font_weight": null
           },
           "variable": {
+            "color": "#282828ff",
+            "font_style": null,
+            "font_weight": null
+          },
+          "variable.special": {
             "color": "#066578ff",
             "font_style": null,
             "font_weight": null

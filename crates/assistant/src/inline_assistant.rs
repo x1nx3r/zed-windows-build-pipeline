@@ -32,15 +32,14 @@ use gpui::{
 };
 use language::{line_diff, Buffer, IndentKind, Point, Selection, TransactionId};
 use language_model::{
-    LanguageModel, LanguageModelRegistry, LanguageModelRequest, LanguageModelRequestMessage,
-    LanguageModelTextStream, Role,
+    report_assistant_event, LanguageModel, LanguageModelRegistry, LanguageModelRequest,
+    LanguageModelRequestMessage, LanguageModelTextStream, Role,
 };
 use language_model_selector::{LanguageModelSelector, LanguageModelSelectorPopoverMenu};
-use language_models::report_assistant_event;
 use multi_buffer::MultiBufferRow;
 use parking_lot::Mutex;
-use project::{CodeAction, ProjectTransaction};
-use prompt_library::PromptBuilder;
+use project::{CodeAction, LspAction, ProjectTransaction};
+use prompt_store::PromptBuilder;
 use rope::Rope;
 use settings::{update_settings_file, Settings, SettingsStore};
 use smol::future::FutureExt;
@@ -387,7 +386,6 @@ impl InlineAssistant {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub fn suggest_assist(
         &mut self,
         editor: &Entity<Editor>,
@@ -1675,7 +1673,6 @@ impl Focusable for PromptEditor {
 impl PromptEditor {
     const MAX_LINES: u8 = 8;
 
-    #[allow(clippy::too_many_arguments)]
     fn new(
         id: InlineAssistId,
         gutter_dimensions: Arc<Mutex<GutterDimensions>>,
@@ -2334,7 +2331,6 @@ struct InlineAssist {
 }
 
 impl InlineAssist {
-    #[allow(clippy::too_many_arguments)]
     fn new(
         assist_id: InlineAssistId,
         group_id: InlineAssistGroupId,
@@ -3570,10 +3566,10 @@ impl CodeActionProvider for AssistantCodeActionProvider {
             Task::ready(Ok(vec![CodeAction {
                 server_id: language::LanguageServerId(0),
                 range: snapshot.anchor_before(range.start)..snapshot.anchor_after(range.end),
-                lsp_action: lsp::CodeAction {
+                lsp_action: LspAction::Action(Box::new(lsp::CodeAction {
                     title: "Fix with Assistant".into(),
                     ..Default::default()
-                },
+                })),
             }]))
         } else {
             Task::ready(Ok(Vec::new()))
