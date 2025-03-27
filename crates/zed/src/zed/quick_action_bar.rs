@@ -1,7 +1,6 @@
 mod markdown_preview;
 mod repl_menu;
 
-use assistant::AssistantPanel;
 use assistant_settings::AssistantSettings;
 use editor::actions::{
     AddSelectionAbove, AddSelectionBelow, DuplicateLineDown, GoToDiagnostic, GoToHunk,
@@ -130,20 +129,8 @@ impl Render for QuickActionBar {
             Box::new(InlineAssist::default()),
             focus_handle.clone(),
             "Inline Assist",
-            {
-                let workspace = self.workspace.clone();
-                move |_, window, cx| {
-                    if let Some(workspace) = workspace.upgrade() {
-                        workspace.update(cx, |workspace, cx| {
-                            AssistantPanel::inline_assist(
-                                workspace,
-                                &InlineAssist::default(),
-                                window,
-                                cx,
-                            );
-                        });
-                    }
-                }
+            move |_, window, cx| {
+                window.dispatch_action(Box::new(InlineAssist::default()), cx);
             },
         );
 
@@ -383,14 +370,14 @@ impl Render for QuickActionBar {
                                 "Column Git Blame",
                                 show_git_blame_gutter,
                                 IconPosition::Start,
-                                Some(editor::actions::ToggleGitBlame.boxed_clone()),
+                                Some(git::Blame.boxed_clone()),
                                 {
                                     let editor = editor.clone();
                                     move |window, cx| {
                                         editor
                                             .update(cx, |editor, cx| {
                                                 editor.toggle_git_blame(
-                                                    &editor::actions::ToggleGitBlame,
+                                                    &git::Blame,
                                                     window,
                                                     cx,
                                                 )

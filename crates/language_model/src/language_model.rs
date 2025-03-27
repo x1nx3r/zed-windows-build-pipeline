@@ -13,13 +13,16 @@ use client::Client;
 use futures::FutureExt;
 use futures::{future::BoxFuture, stream::BoxStream, StreamExt, TryStreamExt as _};
 use gpui::{AnyElement, AnyView, App, AsyncApp, SharedString, Task, Window};
+use icons::IconName;
+use parking_lot::Mutex;
 use proto::Plan;
 use schemars::JsonSchema;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::fmt;
+use std::ops::{Add, Sub};
 use std::{future::Future, sync::Arc};
 use thiserror::Error;
-use ui::IconName;
+use util::serde::is_default;
 
 pub use crate::model::*;
 pub use crate::rate_limiter::*;
@@ -57,8 +60,10 @@ pub struct LanguageModelCacheConfiguration {
 pub enum LanguageModelCompletionEvent {
     Stop(StopReason),
     Text(String),
+    Thinking(String),
     ToolUse(LanguageModelToolUse),
     StartMessage { message_id: String },
+    UsageUpdate(TokenUsage),
 }
 
 #[derive(Debug, PartialEq, Clone, Copy, Serialize, Deserialize)]
@@ -67,6 +72,46 @@ pub enum StopReason {
     EndTurn,
     MaxTokens,
     ToolUse,
+}
+
+#[derive(Debug, PartialEq, Clone, Serialize, Deserialize, Default)]
+pub struct TokenUsage {
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub input_tokens: u32,
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub output_tokens: u32,
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub cache_creation_input_tokens: u32,
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub cache_read_input_tokens: u32,
+}
+
+impl Add<TokenUsage> for TokenUsage {
+    type Output = Self;
+
+    fn add(self, other: Self) -> Self {
+        Self {
+            input_tokens: self.input_tokens + other.input_tokens,
+            output_tokens: self.output_tokens + other.output_tokens,
+            cache_creation_input_tokens: self.cache_creation_input_tokens
+                + other.cache_creation_input_tokens,
+            cache_read_input_tokens: self.cache_read_input_tokens + other.cache_read_input_tokens,
+        }
+    }
+}
+
+impl Sub<TokenUsage> for TokenUsage {
+    type Output = Self;
+
+    fn sub(self, other: Self) -> Self {
+        Self {
+            input_tokens: self.input_tokens - other.input_tokens,
+            output_tokens: self.output_tokens - other.output_tokens,
+            cache_creation_input_tokens: self.cache_creation_input_tokens
+                - other.cache_creation_input_tokens,
+            cache_read_input_tokens: self.cache_read_input_tokens - other.cache_read_input_tokens,
+        }
+    }
 }
 
 #[derive(Debug, PartialEq, Eq, Hash, Clone, Serialize, Deserialize)]
@@ -97,6 +142,8 @@ pub struct LanguageModelToolUse {
 pub struct LanguageModelTextStream {
     pub message_id: Option<String>,
     pub stream: BoxStream<'static, Result<String>>,
+    // Has complete token usage after the stream has finished
+    pub last_token_usage: Arc<Mutex<TokenUsage>>,
 }
 
 impl Default for LanguageModelTextStream {
@@ -104,6 +151,7 @@ impl Default for LanguageModelTextStream {
         Self {
             message_id: None,
             stream: Box::pin(futures::stream::empty()),
+            last_token_usage: Arc::new(Mutex::new(TokenUsage::default())),
         }
     }
 }
@@ -156,6 +204,7 @@ pub trait LanguageModel: Send + Sync {
             let mut events = events.await?.fuse();
             let mut message_id = None;
             let mut first_item_text = None;
+            let last_token_usage = Arc::new(Mutex::new(TokenUsage::default()));
 
             if let Some(first_event) = events.next().await {
                 match first_event {
@@ -170,18 +219,33 @@ pub trait LanguageModel: Send + Sync {
             }
 
             let stream = futures::stream::iter(first_item_text.map(Ok))
-                .chain(events.filter_map(|result| async move {
-                    match result {
-                        Ok(LanguageModelCompletionEvent::StartMessage { .. }) => None,
-                        Ok(LanguageModelCompletionEvent::Text(text)) => Some(Ok(text)),
-                        Ok(LanguageModelCompletionEvent::Stop(_)) => None,
-                        Ok(LanguageModelCompletionEvent::ToolUse(_)) => None,
-                        Err(err) => Some(Err(err)),
+                .chain(events.filter_map({
+                    let last_token_usage = last_token_usage.clone();
+                    move |result| {
+                        let last_token_usage = last_token_usage.clone();
+                        async move {
+                            match result {
+                                Ok(LanguageModelCompletionEvent::StartMessage { .. }) => None,
+                                Ok(LanguageModelCompletionEvent::Text(text)) => Some(Ok(text)),
+                                Ok(LanguageModelCompletionEvent::Thinking(_)) => None,
+                                Ok(LanguageModelCompletionEvent::Stop(_)) => None,
+                                Ok(LanguageModelCompletionEvent::ToolUse(_)) => None,
+                                Ok(LanguageModelCompletionEvent::UsageUpdate(token_usage)) => {
+                                    *last_token_usage.lock() = token_usage;
+                                    None
+                                }
+                                Err(err) => Some(Err(err)),
+                            }
+                        }
                     }
                 }))
                 .boxed();
 
-            Ok(LanguageModelTextStream { message_id, stream })
+            Ok(LanguageModelTextStream {
+                message_id,
+                stream,
+                last_token_usage,
+            })
         }
         .boxed()
     }
