@@ -1,6 +1,7 @@
 use crate::tests::TestServer;
 use call::ActiveCall;
 use collections::{HashMap, HashSet};
+use dap::DapRegistry;
 use extension::ExtensionHostProxy;
 use fs::{FakeFs, Fs as _, RemoveOptions};
 use futures::StreamExt as _;
@@ -9,23 +10,24 @@ use gpui::{
 };
 use http_client::BlockedHttpClient;
 use language::{
+    FakeLspAdapter, Language, LanguageConfig, LanguageMatcher, LanguageRegistry,
     language_settings::{
-        language_settings, AllLanguageSettings, Formatter, FormatterList, PrettierSettings,
-        SelectedFormatter,
+        AllLanguageSettings, Formatter, FormatterList, PrettierSettings, SelectedFormatter,
+        language_settings,
     },
-    tree_sitter_typescript, FakeLspAdapter, Language, LanguageConfig, LanguageMatcher,
-    LanguageRegistry,
+    tree_sitter_typescript,
 };
 use node_runtime::NodeRuntime;
 use project::{
-    lsp_store::{FormatTrigger, LspFormatTarget},
     ProjectPath,
+    lsp_store::{FormatTrigger, LspFormatTarget},
 };
 use remote::SshRemoteClient;
 use remote_server::{HeadlessAppState, HeadlessProject};
 use serde_json::json;
 use settings::SettingsStore;
 use std::{path::Path, sync::Arc};
+use util::{path, separator};
 
 #[gpui::test(iterations = 10)]
 async fn test_sharing_an_ssh_remote_project(
@@ -52,7 +54,7 @@ async fn test_sharing_an_ssh_remote_project(
     let remote_fs = FakeFs::new(server_cx.executor());
     remote_fs
         .insert_tree(
-            "/code",
+            path!("/code"),
             json!({
                 "project1": {
                     ".zed": {
@@ -84,6 +86,7 @@ async fn test_sharing_an_ssh_remote_project(
                 http_client: remote_http_client,
                 node_runtime: node,
                 languages,
+                debug_adapters: Arc::new(DapRegistry::fake()),
                 extension_host_proxy: Arc::new(ExtensionHostProxy::new()),
             },
             cx,
@@ -92,7 +95,7 @@ async fn test_sharing_an_ssh_remote_project(
 
     let client_ssh = SshRemoteClient::fake_client(opts, cx_a).await;
     let (project_a, worktree_id) = client_a
-        .build_ssh_project("/code/project1", client_ssh, cx_a)
+        .build_ssh_project(path!("/code/project1"), client_ssh, cx_a)
         .await;
 
     // While the SSH worktree is being scanned, user A shares the remote project.
@@ -178,7 +181,7 @@ async fn test_sharing_an_ssh_remote_project(
         .unwrap();
     assert_eq!(
         remote_fs
-            .load("/code/project1/src/renamed.rs".as_ref())
+            .load(path!("/code/project1/src/renamed.rs").as_ref())
             .await
             .unwrap(),
         "fn one() -> usize { 100 }"
@@ -193,7 +196,7 @@ async fn test_sharing_an_ssh_remote_project(
                 .path()
                 .to_string_lossy()
                 .to_string(),
-            "src/renamed.rs".to_string()
+            separator!("src/renamed.rs").to_string()
         );
     });
 }
@@ -251,6 +254,7 @@ async fn test_ssh_collaboration_git_branches(
                 http_client: remote_http_client,
                 node_runtime: node,
                 languages,
+                debug_adapters: Arc::new(DapRegistry::fake()),
                 extension_host_proxy: Arc::new(ExtensionHostProxy::new()),
             },
             cx,
@@ -279,7 +283,7 @@ async fn test_ssh_collaboration_git_branches(
     let repo_b = cx_b.update(|cx| project_b.read(cx).active_repository(cx).unwrap());
 
     let branches_b = cx_b
-        .update(|cx| repo_b.read(cx).branches())
+        .update(|cx| repo_b.update(cx, |repo_b, _cx| repo_b.branches()))
         .await
         .unwrap()
         .unwrap();
@@ -293,10 +297,14 @@ async fn test_ssh_collaboration_git_branches(
 
     assert_eq!(&branches_b, &branches_set);
 
-    cx_b.update(|cx| repo_b.read(cx).change_branch(new_branch.to_string()))
-        .await
-        .unwrap()
-        .unwrap();
+    cx_b.update(|cx| {
+        repo_b.update(cx, |repo_b, _cx| {
+            repo_b.change_branch(new_branch.to_string())
+        })
+    })
+    .await
+    .unwrap()
+    .unwrap();
 
     executor.run_until_parked();
 
@@ -309,7 +317,8 @@ async fn test_ssh_collaboration_git_branches(
                     .next()
                     .unwrap()
                     .read(cx)
-                    .current_branch()
+                    .branch
+                    .as_ref()
                     .unwrap()
                     .clone()
             })
@@ -320,18 +329,18 @@ async fn test_ssh_collaboration_git_branches(
 
     // Also try creating a new branch
     cx_b.update(|cx| {
-        repo_b
-            .read(cx)
-            .create_branch("totally-new-branch".to_string())
+        repo_b.update(cx, |repo_b, _cx| {
+            repo_b.create_branch("totally-new-branch".to_string())
+        })
     })
     .await
     .unwrap()
     .unwrap();
 
     cx_b.update(|cx| {
-        repo_b
-            .read(cx)
-            .change_branch("totally-new-branch".to_string())
+        repo_b.update(cx, |repo_b, _cx| {
+            repo_b.change_branch("totally-new-branch".to_string())
+        })
     })
     .await
     .unwrap()
@@ -348,7 +357,8 @@ async fn test_ssh_collaboration_git_branches(
                     .next()
                     .unwrap()
                     .read(cx)
-                    .current_branch()
+                    .branch
+                    .as_ref()
                     .unwrap()
                     .clone()
             })
@@ -408,7 +418,10 @@ async fn test_ssh_collaboration_formatting_with_prettier(
     let buffer_text = "let one = \"two\"";
     let prettier_format_suffix = project::TEST_PRETTIER_FORMAT_SUFFIX;
     remote_fs
-        .insert_tree("/project", serde_json::json!({ "a.ts": buffer_text }))
+        .insert_tree(
+            path!("/project"),
+            serde_json::json!({ "a.ts": buffer_text }),
+        )
         .await;
 
     let test_plugin = "test_plugin";
@@ -447,6 +460,7 @@ async fn test_ssh_collaboration_formatting_with_prettier(
                 http_client: remote_http_client,
                 node_runtime: NodeRuntime::unavailable(),
                 languages,
+                debug_adapters: Arc::new(DapRegistry::fake()),
                 extension_host_proxy: Arc::new(ExtensionHostProxy::new()),
             },
             cx,
@@ -455,7 +469,7 @@ async fn test_ssh_collaboration_formatting_with_prettier(
 
     let client_ssh = SshRemoteClient::fake_client(opts, cx_a).await;
     let (project_a, worktree_id) = client_a
-        .build_ssh_project("/project", client_ssh, cx_a)
+        .build_ssh_project(path!("/project"), client_ssh, cx_a)
         .await;
 
     // While the SSH worktree is being scanned, user A shares the remote project.
