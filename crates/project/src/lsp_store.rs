@@ -467,10 +467,11 @@ impl LocalLspStore {
                                 adapter.process_diagnostics(&mut params, server_id, buffer);
                             }
 
-                            this.update_diagnostics(
+                            this.merge_diagnostics(
                                 server_id,
                                 params,
                                 &adapter.disk_based_diagnostic_sources,
+                                |diagnostic, cx| adapter.retain_old_diagnostic(diagnostic, cx),
                                 cx,
                             )
                             .log_err();
@@ -1187,6 +1188,11 @@ impl LocalLspStore {
         let mut project_transaction = ProjectTransaction::default();
 
         for buffer in &buffers {
+            zlog::debug!(
+                logger =>
+                "formatting buffer '{:?}'",
+                buffer.abs_path.as_ref().unwrap_or(&PathBuf::from("unknown")).display()
+            );
             // Create an empty transaction to hold all of the formatting edits.
             let formatting_transaction_id = buffer.handle.update(cx, |buffer, cx| {
                 // ensure no transactions created while formatting are
@@ -1224,6 +1230,7 @@ impl LocalLspStore {
                     return;
                 };
                 if formatting_transaction.edit_ids.is_empty() {
+                    zlog::debug!(logger => "no changes made while formatting");
                     buffer.forget_transaction(formatting_transaction_id);
                     return;
                 }
@@ -1265,8 +1272,8 @@ impl LocalLspStore {
             })
         })?;
 
-        // Apply edits to the buffer that will become part of the formatting transaction.
-        // Fails if the buffer has been edited since the start of that transaction.
+        /// Apply edits to the buffer that will become part of the formatting transaction.
+        /// Fails if the buffer has been edited since the start of that transaction.
         fn extend_formatting_transaction(
             buffer: &FormattableBuffer,
             formatting_transaction_id: text::TransactionId,
@@ -1426,7 +1433,7 @@ impl LocalLspStore {
                     };
 
                     let Some(language_server) = language_server else {
-                        log::warn!(
+                        log::debug!(
                             "No language server found to format buffer '{:?}'. Skipping",
                             buffer_path_abs.as_path().to_string_lossy()
                         );
@@ -1930,8 +1937,7 @@ impl LocalLspStore {
         let range_formatting_provider = capabilities.document_range_formatting_provider.as_ref();
 
         let lsp_edits = if matches!(formatting_provider, Some(p) if *p != OneOf::Left(false)) {
-            let _timer = zlog::time!(logger => "format-full")
-                .warn_if_gt(std::time::Duration::from_millis(0));
+            let _timer = zlog::time!(logger => "format-full");
             language_server
                 .request::<lsp::request::Formatting>(lsp::DocumentFormattingParams {
                     text_document,
@@ -1940,8 +1946,7 @@ impl LocalLspStore {
                 })
                 .await?
         } else if matches!(range_formatting_provider, Some(p) if *p != OneOf::Left(false)) {
-            let _timer = zlog::time!(logger => "format-range")
-                .warn_if_gt(std::time::Duration::from_millis(0));
+            let _timer = zlog::time!(logger => "format-range");
             let buffer_start = lsp::Position::new(0, 0);
             let buffer_end = buffer.update(cx, |b, _| point_to_lsp(b.max_point_utf16()))?;
             language_server
@@ -3391,7 +3396,7 @@ pub struct LanguageServerStatus {
     pub name: String,
     pub pending_work: BTreeMap<String, LanguageServerProgress>,
     pub has_pending_diagnostic_updates: bool,
-    progress_tokens: HashSet<String>,
+    pub progress_tokens: HashSet<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -6233,6 +6238,13 @@ impl LspStore {
         })
     }
 
+    pub fn language_server_with_name(&self, name: &str, cx: &App) -> Option<LanguageServerId> {
+        self.as_local()?
+            .lsp_tree
+            .read(cx)
+            .server_id_for_name(&LanguageServerName::from(name))
+    }
+
     pub fn language_servers_for_local_buffer<'a>(
         &'a self,
         buffer: &Buffer,
@@ -6376,10 +6388,10 @@ impl LspStore {
         diagnostics: Vec<DiagnosticEntry<Unclipped<PointUtf16>>>,
         cx: &mut Context<Self>,
     ) -> anyhow::Result<()> {
-        self.merge_diagnostic_entries(server_id, abs_path, version, diagnostics, |_| false, cx)
+        self.merge_diagnostic_entries(server_id, abs_path, version, diagnostics, |_, _| false, cx)
     }
 
-    pub fn merge_diagnostic_entries<F: Fn(&Diagnostic) -> bool + Clone>(
+    pub fn merge_diagnostic_entries<F: Fn(&Diagnostic, &App) -> bool + Clone>(
         &mut self,
         server_id: LanguageServerId,
         abs_path: PathBuf,
@@ -6412,7 +6424,7 @@ impl LspStore {
                     .get_diagnostics(server_id)
                     .into_iter()
                     .flat_map(|diag| {
-                        diag.iter().filter(|v| filter(&v.diagnostic)).map(|v| {
+                        diag.iter().filter(|v| filter(&v.diagnostic, cx)).map(|v| {
                             let start = Unclipped(v.range.start.to_point_utf16(&snapshot));
                             let end = Unclipped(v.range.end.to_point_utf16(&snapshot));
                             DiagnosticEntry {
@@ -7017,27 +7029,38 @@ impl LspStore {
         envelope: TypedEnvelope<proto::LanguageServerIdForName>,
         mut cx: AsyncApp,
     ) -> Result<proto::LanguageServerIdForNameResponse> {
-        let buffer_id = BufferId::new(envelope.payload.buffer_id)?;
         let name = &envelope.payload.name;
-        lsp_store
-            .update(&mut cx, |lsp_store, cx| {
-                let buffer = lsp_store.buffer_store.read(cx).get_existing(buffer_id)?;
-                let server_id = buffer.update(cx, |buffer, cx| {
-                    lsp_store
-                        .language_servers_for_local_buffer(buffer, cx)
-                        .find_map(|(adapter, server)| {
-                            if adapter.name.0.as_ref() == name {
-                                Some(server.server_id())
-                            } else {
-                                None
-                            }
-                        })
-                });
-                Ok(server_id)
-            })?
-            .map(|server_id| proto::LanguageServerIdForNameResponse {
-                server_id: server_id.map(|id| id.to_proto()),
-            })
+        match envelope.payload.buffer_id {
+            Some(buffer_id) => {
+                let buffer_id = BufferId::new(buffer_id)?;
+                lsp_store
+                    .update(&mut cx, |lsp_store, cx| {
+                        let buffer = lsp_store.buffer_store.read(cx).get_existing(buffer_id)?;
+                        let server_id = buffer.update(cx, |buffer, cx| {
+                            lsp_store
+                                .language_servers_for_local_buffer(buffer, cx)
+                                .find_map(|(adapter, server)| {
+                                    if adapter.name.0.as_ref() == name {
+                                        Some(server.server_id())
+                                    } else {
+                                        None
+                                    }
+                                })
+                        });
+                        Ok(server_id)
+                    })?
+                    .map(|server_id| proto::LanguageServerIdForNameResponse {
+                        server_id: server_id.map(|id| id.to_proto()),
+                    })
+            }
+            None => lsp_store.update(&mut cx, |lsp_store, cx| {
+                proto::LanguageServerIdForNameResponse {
+                    server_id: lsp_store
+                        .language_server_with_name(name, cx)
+                        .map(|id| id.to_proto()),
+                }
+            }),
+        }
     }
 
     async fn handle_rename_project_entry(
@@ -7513,7 +7536,7 @@ impl LspStore {
         }
     }
 
-    fn on_lsp_progress(
+    pub fn on_lsp_progress(
         &mut self,
         progress: lsp::ProgressParams,
         language_server_id: LanguageServerId,
@@ -8546,12 +8569,12 @@ impl LspStore {
             language_server_id,
             params,
             disk_based_sources,
-            |_| false,
+            |_, _| false,
             cx,
         )
     }
 
-    pub fn merge_diagnostics<F: Fn(&Diagnostic) -> bool + Clone>(
+    pub fn merge_diagnostics<F: Fn(&Diagnostic, &App) -> bool + Clone>(
         &mut self,
         language_server_id: LanguageServerId,
         mut params: lsp::PublishDiagnosticsParams,
@@ -8570,6 +8593,8 @@ impl LspStore {
         let mut primary_diagnostic_group_ids = HashMap::default();
         let mut sources_by_group_id = HashMap::default();
         let mut supporting_diagnostics = HashMap::default();
+
+        let adapter = self.language_server_adapter_for_id(language_server_id);
 
         // Ensure that primary diagnostics are always the most severe
         params.diagnostics.sort_by_key(|item| item.severity);
@@ -8613,7 +8638,14 @@ impl LspStore {
                     diagnostic: Diagnostic {
                         source: diagnostic.source.clone(),
                         code: diagnostic.code.clone(),
+                        code_description: diagnostic
+                            .code_description
+                            .as_ref()
+                            .map(|d| d.href.clone()),
                         severity: diagnostic.severity.unwrap_or(DiagnosticSeverity::ERROR),
+                        markdown: adapter.as_ref().and_then(|adapter| {
+                            adapter.diagnostic_message_to_markdown(&diagnostic.message)
+                        }),
                         message: diagnostic.message.trim().to_string(),
                         group_id,
                         is_primary: true,
@@ -8631,7 +8663,14 @@ impl LspStore {
                                 diagnostic: Diagnostic {
                                     source: diagnostic.source.clone(),
                                     code: diagnostic.code.clone(),
+                                    code_description: diagnostic
+                                        .code_description
+                                        .as_ref()
+                                        .map(|c| c.href.clone()),
                                     severity: DiagnosticSeverity::INFORMATION,
+                                    markdown: adapter.as_ref().and_then(|adapter| {
+                                        adapter.diagnostic_message_to_markdown(&info.message)
+                                    }),
                                     message: info.message.trim().to_string(),
                                     group_id,
                                     is_primary: false,

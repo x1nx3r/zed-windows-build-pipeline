@@ -8,6 +8,7 @@ use http_client::github::AssetKind;
 use http_client::github::{GitHubLspBinaryVersion, latest_github_release};
 pub use language::*;
 use lsp::{InitializeParams, LanguageServerBinary};
+use project::lsp_store::rust_analyzer_ext::CARGO_DIAGNOSTICS_SOURCE_NAME;
 use project::project_settings::ProjectSettings;
 use regex::Regex;
 use serde_json::json;
@@ -20,7 +21,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{Arc, LazyLock},
 };
-use task::{TaskTemplate, TaskTemplates, TaskType, TaskVariables, VariableName};
+use task::{TaskTemplate, TaskTemplates, TaskVariables, VariableName};
 use util::merge_json_value_into;
 use util::{ResultExt, fs::remove_matching, maybe};
 
@@ -129,7 +130,7 @@ impl LspAdapter for RustLspAdapter {
             })
             .await;
         if let Err(err) = result {
-            log::error!(
+            log::debug!(
                 "failed to run rust-analyzer after detecting it in PATH: binary: {:?}: {}",
                 path,
                 err
@@ -252,11 +253,20 @@ impl LspAdapter for RustLspAdapter {
     }
 
     fn disk_based_diagnostic_sources(&self) -> Vec<String> {
-        vec!["rustc".into()]
+        vec![CARGO_DIAGNOSTICS_SOURCE_NAME.to_owned()]
     }
 
     fn disk_based_diagnostics_progress_token(&self) -> Option<String> {
         Some("rust-analyzer/flycheck".into())
+    }
+
+    fn retain_old_diagnostic(&self, previous_diagnostic: &Diagnostic, cx: &App) -> bool {
+        let zed_provides_cargo_diagnostics = ProjectSettings::get_global(cx)
+            .diagnostics
+            .fetch_cargo_diagnostics();
+        // Zed manages the lifecycle of cargo diagnostics when configured so.
+        zed_provides_cargo_diagnostics
+            && previous_diagnostic.source.as_deref() == Some(CARGO_DIAGNOSTICS_SOURCE_NAME)
     }
 
     fn process_diagnostics(
@@ -281,6 +291,12 @@ impl LspAdapter for RustLspAdapter {
                 }
             }
         }
+    }
+
+    fn diagnostic_message_to_markdown(&self, message: &str) -> Option<String> {
+        static REGEX: LazyLock<Regex> =
+            LazyLock::new(|| Regex::new(r"(?m)\n *").expect("Failed to create REGEX"));
+        Some(REGEX.replace_all(message, "\n\n").to_string())
     }
 
     async fn label_for_completion(
@@ -493,12 +509,27 @@ impl LspAdapter for RustLspAdapter {
                     "kinds": [ "cargo", "shell" ],
                 },
             });
-            if let Some(ref mut original_experimental) = original.capabilities.experimental {
+            if let Some(original_experimental) = &mut original.capabilities.experimental {
                 merge_json_value_into(experimental, original_experimental);
             } else {
                 original.capabilities.experimental = Some(experimental);
             }
         }
+
+        let zed_provides_cargo_diagnostics = ProjectSettings::get_global(cx)
+            .diagnostics
+            .fetch_cargo_diagnostics();
+        if zed_provides_cargo_diagnostics {
+            let disable_check_on_save = json!({
+                "checkOnSave": false,
+            });
+            if let Some(initialization_options) = &mut original.initialization_options {
+                merge_json_value_into(disable_check_on_save, initialization_options);
+            } else {
+                original.initialization_options = Some(disable_check_on_save);
+            }
+        }
+
         Ok(original)
     }
 }
@@ -629,7 +660,7 @@ impl ContextProvider for RustContextProvider {
         } else {
             vec!["run".into()]
         };
-        let debug_task_args = if let Some(package_to_run) = package_to_run {
+        let build_task_args = if let Some(package_to_run) = package_to_run {
             vec!["build".into(), "-p".into(), package_to_run]
         } else {
             vec!["build".into()]
@@ -670,32 +701,6 @@ impl ContextProvider for RustContextProvider {
                     RUST_TEST_NAME_TASK_VARIABLE.template_value(),
                     "--".into(),
                     "--nocapture".into(),
-                ],
-                tags: vec!["rust-test".to_owned()],
-                cwd: Some("$ZED_DIRNAME".to_owned()),
-                ..TaskTemplate::default()
-            },
-            TaskTemplate {
-                label: format!(
-                    "Debug Test '{}' (package: {})",
-                    RUST_TEST_NAME_TASK_VARIABLE.template_value(),
-                    RUST_PACKAGE_TASK_VARIABLE.template_value(),
-                ),
-                task_type: TaskType::Debug(task::DebugArgs {
-                    adapter: "LLDB".to_owned(),
-                    request: task::DebugArgsRequest::Launch,
-                    locator: Some("cargo".into()),
-                    tcp_connection: None,
-                    initialize_args: None,
-                    stop_on_entry: None,
-                }),
-                command: "cargo".into(),
-                args: vec![
-                    "test".into(),
-                    "-p".into(),
-                    RUST_PACKAGE_TASK_VARIABLE.template_value(),
-                    RUST_TEST_NAME_TASK_VARIABLE.template_value(),
-                    "--no-run".into(),
                 ],
                 tags: vec!["rust-test".to_owned()],
                 cwd: Some("$ZED_DIRNAME".to_owned()),
@@ -781,30 +786,40 @@ impl ContextProvider for RustContextProvider {
                 ..TaskTemplate::default()
             },
             TaskTemplate {
+                label: "Clean".into(),
+                command: "cargo".into(),
+                args: vec!["clean".into()],
+                cwd: Some("$ZED_DIRNAME".to_owned()),
+                ..TaskTemplate::default()
+            },
+            TaskTemplate {
                 label: format!(
-                    "Debug {} {} (package: {})",
+                    "Build {} {} (package: {})",
                     RUST_BIN_KIND_TASK_VARIABLE.template_value(),
                     RUST_BIN_NAME_TASK_VARIABLE.template_value(),
                     RUST_PACKAGE_TASK_VARIABLE.template_value(),
                 ),
                 cwd: Some("$ZED_DIRNAME".to_owned()),
                 command: "cargo".into(),
-                task_type: TaskType::Debug(task::DebugArgs {
-                    request: task::DebugArgsRequest::Launch,
-                    adapter: "LLDB".to_owned(),
-                    initialize_args: None,
-                    locator: Some("cargo".into()),
-                    tcp_connection: None,
-                    stop_on_entry: None,
-                }),
-                args: debug_task_args,
+                args: build_task_args,
                 tags: vec!["rust-main".to_owned()],
                 ..TaskTemplate::default()
             },
             TaskTemplate {
-                label: "Clean".into(),
+                label: format!(
+                    "Build Test '{}' (package: {})",
+                    RUST_TEST_NAME_TASK_VARIABLE.template_value(),
+                    RUST_PACKAGE_TASK_VARIABLE.template_value(),
+                ),
                 command: "cargo".into(),
-                args: vec!["clean".into()],
+                args: vec![
+                    "test".into(),
+                    "-p".into(),
+                    RUST_PACKAGE_TASK_VARIABLE.template_value(),
+                    RUST_TEST_NAME_TASK_VARIABLE.template_value(),
+                    "--no-run".into(),
+                ],
+                tags: vec!["rust-test".to_owned()],
                 cwd: Some("$ZED_DIRNAME".to_owned()),
                 ..TaskTemplate::default()
             },
@@ -831,6 +846,10 @@ impl ContextProvider for RustContextProvider {
 
     fn lsp_task_source(&self) -> Option<LanguageServerName> {
         Some(SERVER_NAME)
+    }
+
+    fn debug_adapter(&self) -> Option<String> {
+        Some("CodeLLDB".to_owned())
     }
 }
 

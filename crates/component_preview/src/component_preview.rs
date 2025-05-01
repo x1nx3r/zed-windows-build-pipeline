@@ -23,7 +23,7 @@ use project::Project;
 use ui::{Divider, HighlightedLabel, ListItem, ListSubHeader, prelude::*};
 
 use ui_input::SingleLineInput;
-use workspace::{AppState, ItemId, SerializableItem};
+use workspace::{AppState, ItemId, SerializableItem, delete_unloaded_items};
 use workspace::{Item, Workspace, WorkspaceId, item::ItemEvent};
 
 pub fn init(app_state: Arc<AppState>, cx: &mut App) {
@@ -165,6 +165,9 @@ impl ComponentPreview {
         }
 
         component_preview.update_component_list(cx);
+
+        let focus_handle = component_preview.filter_editor.read(cx).focus_handle(cx);
+        window.focus(&focus_handle);
 
         component_preview
     }
@@ -732,8 +735,8 @@ impl From<ComponentId> for ActivePageId {
 impl Item for ComponentPreview {
     type Event = ItemEvent;
 
-    fn tab_content_text(&self, _window: &Window, _cx: &App) -> Option<SharedString> {
-        Some("Component Preview".into())
+    fn tab_content_text(&self, _detail: usize, _cx: &App) -> SharedString {
+        "Component Preview".into()
     }
 
     fn telemetry_event_text(&self) -> Option<&'static str> {
@@ -779,10 +782,13 @@ impl Item for ComponentPreview {
     fn added_to_workspace(
         &mut self,
         workspace: &mut Workspace,
-        _window: &mut Window,
-        _cx: &mut Context<Self>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
     ) {
         self.workspace_id = workspace.database_id();
+
+        let focus_handle = self.filter_editor.read(cx).focus_handle(cx);
+        window.focus(&focus_handle);
     }
 }
 
@@ -854,11 +860,13 @@ impl SerializableItem for ComponentPreview {
         _window: &mut Window,
         cx: &mut App,
     ) -> Task<gpui::Result<()>> {
-        cx.background_spawn(async move {
-            COMPONENT_PREVIEW_DB
-                .delete_unloaded_items(workspace_id, alive_items)
-                .await
-        })
+        delete_unloaded_items(
+            alive_items,
+            workspace_id,
+            "component_previews",
+            &COMPONENT_PREVIEW_DB,
+            cx,
+        )
     }
 
     fn serialize(
